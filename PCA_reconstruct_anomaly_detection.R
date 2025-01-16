@@ -8,7 +8,7 @@ test_breed_2<-geno_data[101:150,]
 # 1) run PCA on reference breed genotype set
 geno_pca <- prcomp(reference_breed,center = TRUE, scale. = FALSE)
 
-# geno_pca$rotation is eigen vector matrix
+# geno_pca$rotation is the eigen vector matrix
 dim(geno_pca$rotation) # 100  50
 # 50 is the principal component number 
 
