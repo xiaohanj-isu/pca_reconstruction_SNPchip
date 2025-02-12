@@ -1,0 +1,328 @@
+---
+title: "Prediction of health status with feed behavior"
+author: "Xiaohan Jiang"
+date: "2025-02-07"
+output:
+  html_document:
+    toc: true          
+    toc_float: true    
+    toc_depth: 6      
+    theme: default 
+    mathjax: default
+    df_print: paged
+    css: styles.css
+---
+
+# Clean and recode data
+```{r}
+# read data
+feed <- read.csv("feed_social.csv")
+colnames(feed) <- gsub("\\.\\.\\.", " ", colnames(feed))
+colnames(feed) <- gsub(" ", "", colnames(feed))
+feed<-feed[1:46,]
+colnames(feed)
+```
+
+
+```{r}
+# missing values in social set to another class, 2
+Social <- c("Yes.no.Social..d1","Yes.no.Social..d2","Yes.no.Social..d3","Yes.no.Social..d5","Yes.no.Social..d6")
+for (col in Social) {
+  feed[[col]] <- ifelse(feed[[col]] == ".", 2, feed[[col]])
+}
+
+# missing values in Lat set to 3600 seconds
+Lat <- c("LatSec.d1","LatSec.d2","LatSec.d3","LatSec.d5","LatSec.d6")
+for (col in Lat) {
+  feed[[col]] <- ifelse(feed[[col]] == ".", 3600, feed[[col]])
+}
+
+# missing values in Dur set to 0
+Dur <- c("DurSec.d1","DurSec.d2","DurSec.d3","DurSec.d5","DurSec.d6")
+for (col in Dur) {
+  feed[[col]] <- ifelse(feed[[col]] == ".", 0, feed[[col]])
+}
+
+# select predictors
+predictors <- c("Feeder.d1", "Feeder.d2", "Feeder.d3", "Feeder.d5", "Feeder.d6",
+                "LatSec.d1","LatSec.d2","LatSec.d3","LatSec.d5","LatSec.d6",
+                "DurSec.d1","DurSec.d2","DurSec.d3","DurSec.d5","DurSec.d6",
+                "Yes.no.Social..d1","Yes.no.Social..d2","Yes.no.Social..d3","Yes.no.Social..d5","Yes.no.Social..d6")
+
+feed_selected <- feed[, c("Treatmnet", predictors)]
+# feed selected is the dataset we will use, 46 observations and 21 variables
+
+# make predictors and response as factor
+predictors_binary <- c("Feeder.d1", "Feeder.d2", "Feeder.d3", "Feeder.d5", "Feeder.d6",
+                       "Yes.no.Social..d1","Yes.no.Social..d2","Yes.no.Social..d3","Yes.no.Social..d5","Yes.no.Social..d6")
+predictors_integer <- c("DurSec.d1","DurSec.d2","DurSec.d3","DurSec.d5","DurSec.d6",
+                        "LatSec.d1","LatSec.d2","LatSec.d3","LatSec.d5","LatSec.d6")
+
+feed_selected$Treatmnet <- ifelse(feed_selected$Treatmnet == "M", 1, 0)
+feed_selected$Treatmnet <- as.factor(feed_selected$Treatmnet)
+for (predictor in predictors_binary) {
+  feed_selected[[predictor]] <- as.factor(feed_selected[[predictor]])
+}
+for (predictor in predictors_integer) {
+  feed_selected[[predictor]] <- as.numeric(feed_selected[[predictor]])
+}
+
+#get our final feed_selected dataset
+head(feed_selected)
+```
+```{r}
+# Load required packages
+library(MASS)
+library(caret) # apply model and cross validation
+library(randomForest)
+library(glmnet)
+library(gbm)
+```
+
+```{r}
+# preprocess numeric variables: centered and scaled 
+preprocess_params <- preProcess(feed_selected[, predictors_integer], method = c("center", "scale"))
+feed_selected <- predict(preprocess_params, feed_selected)
+```
+
+
+# Descriptive analysis
+
+```{r fig.show='hold'}
+# Feeder
+par(mfrow = c(2, 3))
+
+for (i in 2:6) {
+  plot(feed_selected$Treatmnet, feed_selected[[i]],
+       main = colnames(feed_selected)[i],
+       xlab = "Treatmnet",
+       ylab = colnames(feed_selected)[i])
+}
+```
+
+
+
+```{r fig.show='hold'}
+# Social, 0 (No), 1 (Yes), 2 (without records)
+par(mfrow = c(2, 3))
+
+for (i in 17:21) {
+  plot(feed_selected$Treatmnet, feed_selected[[i]],
+       main = colnames(feed_selected)[i],
+       xlab = "Treatmnet",
+       ylab = colnames(feed_selected)[i])
+}
+```
+
+```{r}
+#Latency
+featurePlot(x = feed_selected[,7:11], 
+            y = feed_selected$Treatmnet, 
+            plot = "box",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"), 
+                          y = list(relation="free")))
+```
+
+```{r}
+# Duration
+featurePlot(x = feed_selected[,12:16], 
+            y = feed_selected$Treatmnet, 
+            plot = "box",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"), 
+                          y = list(relation="free")))
+
+```
+
+
+# Run classification models: all features
+
+```{r}
+# 4 models: random forest, logistic regression, GBM (logistic), GBM (adaboost)
+# use default tune grid: random forest, logitic regression
+# use self-defined tune grid: GBM (logistic), GBM (adaboost)
+run_model_cv <- function(data, method, tune_grid = NULL, distribution = NULL) {
+  # Train control 10 fold
+  train_control_cv <- trainControl(
+    method = "cv",
+    number = 10,
+    savePredictions = "final",
+    classProbs = FALSE
+  )
+  
+  # Train model: select model type
+  if (method == "gbm" || method == "adaboost") {
+    model <- train(
+      Treatmnet ~ .,
+      data = data,
+      method = method,
+      distribution = if (!is.null(distribution)) distribution else "bernoulli",
+      trControl = train_control_cv,
+      tuneGrid = if (!is.null(tune_grid)) tune_grid else NULL,
+      verbose = FALSE
+    )
+    
+    # Extract best parameters
+    best_n.trees           <- model$bestTune$n.trees
+    best_interaction.depth <- model$bestTune$interaction.depth
+    best_shrinkage         <- model$bestTune$shrinkage
+    best_n.minobsinnode    <- model$bestTune$n.minobsinnode
+    
+    # Subset predictions for the best hyperparameter combination
+    preds <- subset(
+        model$pred,
+        n.trees == best_n.trees &
+        interaction.depth == best_interaction.depth &
+        shrinkage == best_shrinkage &
+        n.minobsinnode == best_n.minobsinnode
+    )
+    
+  } else if (method == "glmnet") {
+    model <- train(
+      Treatmnet ~ .,
+      data = data,
+      method = "glmnet",
+      trControl = train_control_cv
+    )
+    preds <- model$pred
+    
+  } else {
+    # random forest 
+    model <- train(
+      Treatmnet ~ .,
+      data = data,
+      method = method,
+      trControl = train_control_cv
+    )
+    preds <- model$pred
+  }
+
+  # Compute variable importance
+  importance <- varImp(model)$importance
+  
+  # Compute confusion matrix based on cross-validated predictions
+  conf_matrix <- confusionMatrix(
+    data = as.factor(preds$pred),
+    reference = as.factor(preds$obs),
+    positive = "1"
+  )
+  
+  # Extract accuracy, sensitivity, and specificity
+  acc <- conf_matrix$overall["Accuracy"]
+  sens <- conf_matrix$byClass["Sensitivity"]
+  spec <- conf_matrix$byClass["Specificity"]
+  
+  # Return results as a list with both metrics vector and variable importance
+  return(list(
+    metrics = c(Accuracy = acc, Sensitivity = sens, Specificity = spec),
+    importance = importance
+  ))
+}
+```
+
+## 1) Random forest
+```{r}
+set.seed(100)
+result_rf <- run_model_cv(feed_selected, "rf")
+```
+
+## 2) Logistic Regression
+```{r}
+result_glmnet <- run_model_cv(feed_selected, "glmnet")
+```
+
+
+## 3) Gradient Boosting
+```{r}
+# set range for four hyperparameters
+tune_grid_gbm <- expand.grid(
+  n.trees = c(100, 500, 1000),       
+  interaction.depth = c(1, 2, 3),       
+  shrinkage = c(0.1, 0.01),          
+  n.minobsinnode = c(3,5,7)          
+)
+result_gbm <- run_model_cv(feed_selected, "gbm", tune_grid_gbm, "bernoulli")
+```
+
+## 4) AdaBoost
+```{r}
+result_adaboost <- run_model_cv(feed_selected, "gbm", tune_grid_gbm, "adaboost")
+```
+
+## 5) Summarize results and select features
+```{r}
+importance_df <- data.frame(
+  Random_Forest = result_rf$importance,
+  Logistic_Regression = result_glmnet$importance,
+  GBM_Logistic = result_gbm$importance,
+  GBM_AdaBoost = result_adaboost$importance,
+  row.names = rownames(result_rf$importance)
+)
+colnames(importance_df) <- c("Random Forest", "Logistic Regression", "GBM (Logistic)", "GBM (AdaBoost)")
+importance_df
+```
+```{r}
+results_df <- do.call(rbind, list(
+  result_rf$metrics,
+  result_glmnet$metrics,
+  result_gbm$metrics,
+  result_adaboost$metrics
+))
+rownames(results_df) <- c("Random Forest", "Logistic Regression", "GBM (Logistic)", "GBM (AdaBoost)")
+colnames(results_df) <- c("Accuracy", "Sensitivity", "Specificity")
+results_df
+```
+
+
+```{r}
+# find common variables in top 10 variables
+top_10_variables <- lapply(importance_df, function(column) {
+  rownames(importance_df)[order(column, decreasing = TRUE)[1:10]]
+})
+
+common_top_10 <- Reduce(intersect, top_10_variables)
+common_top_10 
+```
+
+
+# Run classification models: selected features
+```{r}
+selected_feature<- c("LatSec.d2","LatSec.d6","DurSec.d5")
+feed_selected_feature <- feed_selected[,c("Treatmnet",selected_feature)]
+result_rf_feature <- run_model_cv(feed_selected_feature, "rf")
+result_glmnet_feature <- run_model_cv(feed_selected_feature, "glmnet")
+result_gbm_feature <- run_model_cv(feed_selected_feature, "gbm", tune_grid_gbm, "bernoulli")
+result_adaboost_feature <- run_model_cv(feed_selected_feature, "gbm", tune_grid_gbm, "adaboost")
+```
+
+```{r}
+importance_df_feature<- data.frame(
+  Random_Forest = result_rf_feature$importance,
+  Logistic_Regression = result_glmnet_feature$importance,
+  GBM_Logistic = result_gbm_feature$importance,
+  GBM_AdaBoost = result_adaboost_feature$importance,
+  row.names = rownames(result_rf_feature$importance)
+)
+colnames(importance_df_feature) <- c("Random Forest", "Logistic Regression", "GBM (Logistic)", "GBM (AdaBoost)")
+importance_df_feature
+```
+
+```{r}
+results_df_feature <- do.call(rbind, list(
+  result_rf_feature$metrics,
+  result_glmnet_feature$metrics,
+  result_gbm_feature$metrics,
+  result_adaboost_feature$metrics
+))
+rownames(results_df_feature) <- c("Random Forest", "Logistic Regression", "GBM (Logistic)", "GBM (AdaBoost)")
+colnames(results_df_feature) <- c("Accuracy", "Sensitivity", "Specificity")
+results_df_feature
+```
+
+```{r}
+# compare with all features
+results_df
+```
+
+
